@@ -1,0 +1,200 @@
+---
+title: "406 Final Project Code"
+author: "Lydia Rogers"
+date: "3/24/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+## Overview of Computations
+
+1. Load data
+2. Remove outcomes that are not of interest to us
+3. Generate new indicator variables for black cats and pitbulls
+4. Parameter estimation for adoption outcomes of black cats, pitbulls, all cats, and all dogs entering shelter
+5. Least squares regression to predict length of stay of adopted animals from age, intake type, animal type, sex of animal
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+library(coin)
+library(knitr)
+```
+
+```{r}
+intake <- read_csv("Austin_Animal_Center_Intakes.csv")
+outcome <- read_csv("Austin_Animal_Center_Outcomes.csv")
+intake$DateTime <- mdy_hms(intake$DateTime)
+intake$MonthYear <- mdy_hms(intake$MonthYear)
+outcome$DateTime <- mdy_hms(outcome$DateTime)
+outcome$MonthYear <- mdy_hms(outcome$MonthYear)
+```
+
+Combine datasets to create comprehensive overview
+Create new variables: length of time spent at shelter, datetime age in months, black cat indicator, pitbull indicator. Also, remove outcomes that are not of interest to us.
+
+Some differences in intakes and outcomes have negative values, indicating that a particular animal was at the shelter more than once (some animals are adopted and returned). For these animals, we keep only non-negative differences in outcome
+```{r}
+intake_outcome <- intake %>% left_join(outcome, by = c("Animal ID" = "Animal ID"))
+
+intake_outcome <- intake_outcome %>% mutate(
+  TimeAtShelter = difftime(DateTime.y, DateTime.x, units = c("days")), 
+  BlackCat = `Animal Type.x` == "Cat" & Color.x == "Black", 
+  Pitbull = str_detect(Breed.x, "Pit Bull"), 
+  adopted = ifelse(`Outcome Type` == "Adoption", 1, 0)) %>% 
+  filter(
+    `Outcome Type` %in% c("Adoption", "Died", "Euthanasia", "Relocate", "Transfer", NA), 
+    TimeAtShelter >= 0, 
+    `Animal Type.x` %in% c("Dog", "Cat"))
+```
+
+Basic visualizations for exploratory data analysis for length of stay and outcomes for dogs and cats
+```{r}
+ggplot(data = filter(intake_outcome, TimeAtShelter < 100)) + 
+  geom_density(aes(x = TimeAtShelter, color = `Animal Type.x`)) + 
+  labs(title = "Cats and Dogs Spending Less than 100 Days at AAC, 2013-2021") 
+#excludes 10,098 animals who spent more than 100 days at the shelter
+
+ggplot(data = intake_outcome) + 
+  geom_bar(aes(x = `Animal Type.x`, fill = `Outcome Type`)) + 
+  labs(x = "Animal Type", title = "Outcomes of Interest for Cats and Dogs at AAC, 2013-2021")
+```
+
+## Questions 1 and 2: Basic analysis and permutation tests for differences between black cats and all other cats and pit bulls and all other dogs
+
+* For all cats/dogs adopted from AAC in this time frame, how do the lengths of stays compare between black cats/pit bulls and all other cats/dogs?
+* How do the proportions of black cats/pit bulls adopted vs. other outcomes compare with the same proportion amongst all other cats/dogs?
+
+```{r}
+#proportions of adoptions for black cats
+prop.table(table(intake_outcome$BlackCat, intake_outcome$`Outcome Type`), 1)
+
+#proportions of adoptions for pit bulls
+prop.table(table(intake_outcome$Pitbull, intake_outcome$`Outcome Type`), 1)
+
+#plot length of time at shelter for adopted cats
+ggplot(data = filter(intake_outcome, `Outcome Type` == "Adoption", `Animal Type.x` == "Cat", TimeAtShelter < 100)) + 
+  geom_density(aes(x = TimeAtShelter, color = BlackCat))
+
+#plot length of time at shelter for adopted dogs
+ggplot(data = filter(intake_outcome, `Outcome Type` == "Adoption", `Animal Type.x` == "Dog", TimeAtShelter < 100)) + geom_density(aes(x = TimeAtShelter, color = Pitbull))
+
+#fisher exact test for difference in proportions between all cats and balck cats
+cats <- filter(intake_outcome, `Animal Type.x` == "Cat")
+fisher.test(cats$adopted, cats$BlackCat)
+
+#fisher exact test for difference in proportions between all dogs and pit bulls
+dogs <- filter(intake_outcome, `Animal Type.x` == "Dog")
+fisher.test(dogs$adopted, dogs$Pitbull)
+```
+
+Permutation test for difference in mean length of time spent at AAC for black cats and all other cats who were eventually adopted
+```{r}
+adopted_cats <- intake_outcome %>% filter(`Outcome Type` == "Adoption", `Animal Type.x` == "Cat")
+
+actual_diff <- diff(by(adopted_cats$TimeAtShelter, adopted_cats$BlackCat, median))
+
+dist <- replicate(10000, diff(by(adopted_cats$TimeAtShelter, sample(adopted_cats$BlackCat, length(adopted_cats$BlackCat), FALSE), median)))
+
+hist(dist, col = "black", xlim = c(-2, 8), breaks = 100, main = "Permutated and Actual Differences in Medians 
+     Between Black Cats and Other Cats", xlab = "Difference in Medians")
+abline(v = actual_diff, col = "blue", lwd = 2)
+sum(dist > actual_diff)/10000
+```
+
+Next, do the same thing for pit bulls
+```{r}
+adopted_dogs <- intake_outcome %>% filter(`Outcome Type` == "Adoption", `Animal Type.x` == "Dog")
+
+actual_diff <- diff(by(adopted_dogs$TimeAtShelter, adopted_dogs$Pitbull, median))
+
+dist <- replicate(10000, diff(by(adopted_dogs$TimeAtShelter, sample(adopted_dogs$Pitbull, length(adopted_dogs$Pitbull), FALSE), median)))
+
+hist(dist, xlim = c(-2, 29), breaks = 100, main = "Permutated and Actual Differences in Medians 
+     Between Pit Bulls and Other Dogs", xlab = "Difference in Medians")
+abline(v = actual_diff, col = "blue", lwd = 2)
+sum(dist > actual_diff)/10000
+
+```
+
+Finally, perform least squares regression to predict length of stay for cats and dogs
+```{r}
+adopted <- mutate(adopted, young = !str_detect(`Age upon Outcome`, "year"))
+
+mod <- lm(as.numeric(TimeAtShelter) ~ BlackCat + Pitbull + `Intake Type` + young + `Sex upon Outcome` + `Animal Type.y`,data = adopted)
+
+summary(mod)
+
+knitr::kable(data.frame(mod$coefficients, summary(mod)$coefficients[,4]), col.names = c("Coefficient Estimate", "P-value"))
+```
+
+## Simulated Data
+```{r}
+probs <- c(0.01, 0.1, 0.25, 0.5, 0.75)
+
+# new samples for simulation
+sim_cats1 <- rbinom(nrow(cats), 1, probs[1])
+sim_cats2 <- rbinom(nrow(cats), 1, probs[2])
+sim_cats3 <- rbinom(nrow(cats), 1, probs[3])
+sim_cats4 <- rbinom(nrow(cats), 1, probs[4])
+sim_cats5 <- rbinom(nrow(cats), 1, probs[5])
+
+sim_dogs1 <- rbinom(nrow(dogs), 1, probs[1])
+sim_dogs2 <- rbinom(nrow(dogs), 1, probs[2])
+sim_dogs3 <- rbinom(nrow(dogs), 1, probs[3])
+sim_dogs4 <- rbinom(nrow(dogs), 1, probs[4])
+sim_dogs5 <- rbinom(nrow(dogs), 1, probs[5])
+
+#fisher's exact test on new samples
+fisher.test(cats$adopted, sim_cats1)$p.value
+fisher.test(cats$adopted, sim_cats2)$p.value
+fisher.test(cats$adopted, sim_cats3)$p.value
+fisher.test(cats$adopted, sim_cats4)$p.value
+fisher.test(cats$adopted, sim_cats5)$p.value
+
+fisher.test(dogs$adopted, sim_dogs1)$p.value
+fisher.test(dogs$adopted, sim_dogs2)$p.value
+fisher.test(dogs$adopted, sim_dogs3)$p.value
+fisher.test(dogs$adopted, sim_dogs4)$p.value
+fisher.test(dogs$adopted, sim_dogs5)$p.value
+```
+analyze usefulness of linear model
+```{r}
+sum((mod$residuals)^2)
+```
+
+
+### Some code used to intial EDA for the initial draft of the paper
+```{r}
+#outcome <- outcome %>% mutate(black_cat = (Color == "Black" & `Animal Type` == "Cat"), )
+#black.outcome <- table(outcome$`Outcome Type`, outcome$black)
+#sum(outcome$black)
+#nrow(outcome)
+#prop.table(black.outcome, 2)
+
+#black.cat.outcome <- table(outcome$`Outcome Type`, outcome$black_cat)
+#prop.table(black.cat.outcome, 2)
+```
+
+```{r}
+#black cats vs all cats
+#cats_outcome <- outcome %>% filter(`Animal Type` == "Cat")
+#prop.table(table(cats_outcome$`Outcome Type`, cats_outcome$black), 2)
+```
+
+```{r}
+#find all cats from intake and see which were adopted
+#intake <- intake %>% mutate(black = Color == "Black")
+#combined_intake_outcome <- left_join(intake, outcome, by=c("Animal ID", "Breed", "Color"))
+#prop.table(table(combined_intake_outcome$`Outcome Type`, combined_intake_outcome$black), 2)
+#sum(is.na(combined_intake_outcome$`Outcome Type`))
+
+
+```
+
+```{r}
+# plot data of cats vs. dogs
+#ggplot(data = filter(combined_intake_outcome, `Animal Type.x` == "Cat" | `Animal Type.x` == "Dog")) + geom_bar(aes(x = `Animal Type.x`, fill = `Outcome Type`))
+```
